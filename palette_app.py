@@ -1,322 +1,443 @@
-"""Pixel Pop: color palette extractor (tkinter desktop app)."""
+"""Pixel Pop: color palette extractor (tkinter desktop app).
+if-else: describe_color, read_count | loop: palette_of, build_mood_board
+list: paths, palettes | tuple/set/dict: Swatch, shared tones, tabs dict
+string: rgb_to_hex, compare_text | libraries: scikit-learn, Pillow, matplotlib, tkinter
+"""
 import os
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from PIL import Image, ImageTk, ImageDraw
+from collections import Counter
+from dataclasses import dataclass
+from tkinter import filedialog, messagebox, ttk
+
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.figure import Figure
+from PIL import Image, ImageDraw, ImageOps, ImageTk
 from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
 
-RESIZE_TO, PREVIEW_SIZE = (100, 100), (340, 240)
-STRIP_W, STRIP_H, BOARD_W, CELL_H = 600, 60, 900, 240
-MIN_C, MAX_C, DEFAULT_C, SIMILAR = 3, 8, 5, 40
+LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
 FILE_TYPES = [("Images", "*.jpg *.jpeg *.png"), ("All files", "*.*")]
-
-BG = "#F7F4DC"
-CARD = "#949088"
-CARD_TEXT = "white"
-CARD_ALT = "#949088"
-INK, MUTED, BORDER = "#2E2A3A", "#5E5A68", "#B8BCCB"
-ACCENT, ACCENT_HOVER = "#949088", "#7D7870"
-FONT, FONT_BOLD = ("Century Gothic", 10), ("Century Gothic", 10, "bold")
-HEADING, TITLE = ("Century Gothic", 12, "bold"), ("Century Gothic", 18, "bold")
-TAB_ON = ("Century Gothic", 14, "bold")   # selected tab: bigger
-TAB_OFF = ("Century Gothic", 10)          # unselected tab: smaller
-TAB_OFF_BG = "#E9E4C8"                    # unselected tab background
+RESIZE, PREVIEW, BOARD_PREVIEW, LOGO_SIZE = (100, 100), (340, 240), (860, 420), (360, 200)
+BAR_W, BAR_H, BOARD_W, CELL_H = 600, 60, 900, 240
+MIN_C, MAX_C, DEFAULT_C, SIMILAR = 3, 8, 5, 40
+PAGE, BOX, PHOTO, TAB_BG = "#FCF8FF", "#CAC3E7", "#FCF6F9", "#E6E1F5"
+BORDER, HOVER, TEXT = "#A9A1CC", "#B3AADB", "black"
+FONT, BOLD = ("Century Gothic", 10), ("Century Gothic", 10, "bold")
+HEAD, TITLE = ("Century Gothic", 12, "bold"), ("Century Gothic", 18, "bold")
+TAB_FONT_ON, TAB_FONT_OFF = ("Century Gothic", 14, "bold"), ("Century Gothic", 10)
 MONO = ("Consolas", 10)
+
+
+@dataclass(frozen=True)
+class Swatch:
+    rgb: tuple
+    hex_code: str
+    share: float
+    name: str
 
 
 # ---------- Analysis ----------
 
 def load_image(path):
+    """Open a photo as RGB, turned upright. Returns None if it isn't an image."""
     try:
-        return Image.open(path).convert("RGB")
+        return ImageOps.exif_transpose(Image.open(path)).convert("RGB")
     except OSError:
-        raise ValueError(f"'{os.path.basename(path)}' is not a valid image.")
+        return None
 
 
-def shrink(img):
-    small = img.copy()
-    small.thumbnail(RESIZE_TO)
-    return small
-
-
-def describe(c):
-    r, g, b = c
-    avg = (r + g + b) / 3
-    if avg < 50:
+def describe_color(rgb):
+    r, g, b = rgb
+    brightness = sum(rgb) / 3
+    if brightness < 50:
         return "Dark"
-    if avg > 200:
+    if brightness > 200:
         return "Light"
     if r >= g and r >= b:
         return "Warm (red-ish)"
     return "Green-ish" if g >= b else "Cool (blue-ish)"
 
 
-def dist(c1, c2):
-    return sum((a - b) ** 2 for a, b in zip(c1, c2)) ** 0.5
+def distance(a, b):
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
 
 
-def find_palette(pixels, n):
+def palette_of(images, n):
+    """Group the pixels of one or more photos into n colors, most common first."""
+    pixels = []
+    for img in images:
+        small = img.copy()
+        small.thumbnail(RESIZE)
+        pixels.extend(small.getdata())
     model = KMeans(n_clusters=n, n_init=10, random_state=0).fit(pixels)
-    counts = [list(model.labels_).count(i) for i in range(n)]
-    palette = []
-    for center, count in zip(model.cluster_centers_, counts):
-        c = tuple(int(v) for v in center)
-        palette.append({"color": c, "hex": "#{:02X}{:02X}{:02X}".format(*c),
-                        "share": count / len(pixels) * 100, "name": describe(c)})
-    return sorted(palette, key=lambda e: e["share"], reverse=True)
+    counts = Counter(model.labels_.tolist())
+    swatches = []
+    for k, center in enumerate(model.cluster_centers_):
+        rgb = tuple(int(v) for v in center)
+        share = counts[k] / len(pixels) * 100
+        hex_code = "#{:02X}{:02X}{:02X}".format(*rgb)
+        swatches.append(Swatch(rgb, hex_code, share, describe_color(rgb)))
+    return sorted(swatches, key=lambda s: s.share, reverse=True)
 
 
-def compare(pa, pb):
-    matches = []
-    for a in pa:
-        b = min(pb, key=lambda x: dist(a["color"], x["color"]))
-        d = dist(a["color"], b["color"])
+def compare_text(p1, p2):
+    """The comparison summary: tones, close color pairs, and shared tones."""
+    tones1 = sorted({s.name for s in p1})
+    if p2 is None:
+        return f"Photo 1 tones: {', '.join(tones1)}\nChoose photo 2 to see a comparison."
+    tones2 = sorted({s.name for s in p2})
+    lines = [f"Photo 1 tones: {', '.join(tones1)}", f"Photo 2 tones: {', '.join(tones2)}"]
+    pairs = []
+    for a in p1:
+        b = min(p2, key=lambda s: distance(a.rgb, s.rgb))
+        d = distance(a.rgb, b.rgb)
         if d <= SIMILAR:
-            matches.append((a, b, d))
-    return matches
+            pairs.append(f"   {a.hex_code} (photo 1)  ~  {b.hex_code} (photo 2)   distance {d:.0f}")
+    lines.append("Close matches:" if pairs else "No close color matches.")
+    lines += pairs
+    shared = sorted(set(tones1) & set(tones2))
+    lines.append("Shared tones: " + (", ".join(shared) or "none"))
+    return "\n".join(lines)
 
 
-def build_mood_board(images, n):
-    pixels = [p for img in images for p in shrink(img).getdata()]
-    palette = find_palette(pixels, n)
+def build_mood_board(images, palette):
+    """All photos in one collage, with the shared color bar along the bottom."""
     cols = min(3, len(images))
     rows = -(-len(images) // cols)
     cell_w = BOARD_W // cols
-    board = Image.new("RGB", (cell_w * cols, CELL_H * rows + STRIP_H), "white")
-    for i, pic in enumerate(images):
-        tile = pic.copy()
+    board = Image.new("RGB", (cell_w * cols, CELL_H * rows + BAR_H), "white")
+    for i, img in enumerate(images):
+        tile = img.copy()
         tile.thumbnail((cell_w - 10, CELL_H - 10))
-        board.paste(tile, ((i % cols) * cell_w + (cell_w - tile.width) // 2,
-                           (i // cols) * CELL_H + (CELL_H - tile.height) // 2))
-    board.paste(swatch_strip(palette, board.width, STRIP_H), (0, board.height - STRIP_H))
-    return board, palette
+        x = (i % cols) * cell_w + (cell_w - tile.width) // 2
+        y = (i // cols) * CELL_H + (CELL_H - tile.height) // 2
+        board.paste(tile, (x, y))
+    board.paste(color_bar(palette, board.width, BAR_H), (0, board.height - BAR_H))
+    return board
 
 
 # ---------- Output ----------
 
-def swatch_strip(palette, width, height):
-    strip = Image.new("RGB", (width, height), "white")
-    draw, x = ImageDraw.Draw(strip), 0
-    for i, e in enumerate(palette):
-        end = width if i == len(palette) - 1 else min(width, x + round(width * e["share"] / 100))
+def color_bar(palette, width, height):
+    """Each block is as wide as its share of the photo."""
+    bar = Image.new("RGB", (width, height), "white")
+    draw, x = ImageDraw.Draw(bar), 0
+    for i, s in enumerate(palette):
+        end = width if i == len(palette) - 1 else min(width, x + round(width * s.share / 100))
         if end > x:
-            draw.rectangle([x, 0, end - 1, height - 1], fill=e["color"])
+            draw.rectangle([x, 0, end - 1, height - 1], fill=s.rgb)
         x = end
-    return strip
+    return bar
 
 
 def save_text(palette, path):
     with open(path, "w") as f:
-        f.writelines(f"{e['hex']}  {e['share']:.1f}%  {e['name']}\n" for e in palette)
+        for s in palette:
+            f.write(f"{s.hex_code}  {s.share:.1f}%  {s.name}\n")
 
 
-def show_chart(img, palette, title):
-    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4.5))
-    ax1.imshow(img)
-    ax1.set_title("Image (resized)")
-    ax1.axis("off")
-    ax2.bar([e["hex"] for e in palette], [e["share"] for e in palette],
-            color=[tuple(v / 255 for v in e["color"]) for e in palette], edgecolor="#555555")
-    ax2.set_title(title)
-    ax2.set_ylabel("Share of pixels (%)")
-    fig.tight_layout()
-    plt.show()
-    plt.close(fig)
+def to_unit(rgb):
+    return tuple(v / 255 for v in rgb)
+
+
+# ---------- Charts ----------
+
+def pie_chart(img, palette, title):
+    """The photo beside a pie of its colors. Percentages sit in a legend."""
+    fig = Figure(figsize=(10, 5), layout="tight")
+    photo = fig.add_subplot(1, 2, 1)
+    photo.imshow(img)
+    photo.set_title("Image")
+    photo.axis("off")
+    ax = fig.add_subplot(1, 2, 2)
+    wedges, _ = ax.pie([s.share for s in palette], colors=[to_unit(s.rgb) for s in palette],
+                       startangle=90, counterclock=False, wedgeprops={"edgecolor": "white"})
+    ax.legend(wedges, [f"{s.hex_code}   {s.share:.1f}%" for s in palette],
+              loc="center left", bbox_to_anchor=(1.0, 0.5), frameon=False, fontsize=9)
+    ax.set_title(title)
+    ax.axis("equal")
+    return fig
+
+
+def shift_chart(names, palettes):
+    """One stacked bar per photo. Each bar shows that photo's own palette."""
+    fig = Figure(figsize=(10, 5), layout="tight")
+    ax = fig.add_subplot(1, 1, 1)
+    bottoms = [0.0] * len(palettes)
+    for layer in range(max(len(p) for p in palettes)):
+        for i, palette in enumerate(palettes):
+            if layer < len(palette):
+                s = palette[layer]
+                ax.bar(i, s.share, bottom=bottoms[i], color=to_unit(s.rgb), edgecolor="white")
+                bottoms[i] += s.share
+    ax.set_xticks(range(len(names)))
+    ax.set_xticklabels(names, rotation=20, ha="right")
+    ax.set_ylabel("Share of pixels (%)")
+    ax.set_title("How the palette changes across photos")
+    return fig
+
+
+def open_chart_window(figures, title):
+    """A window about 45% of the screen. Buttons are packed first so they stay visible."""
+    win = tk.Toplevel()
+    win.title(title)
+    win.configure(bg=PAGE)
+    sw, sh = win.winfo_screenwidth(), win.winfo_screenheight()
+    w, h = int(sw / 2.2), int(sh / 2.2)
+    win.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    win.minsize(600, 420)
+
+    buttons = tk.Frame(win, bg=PAGE)
+    buttons.pack(side="bottom", fill="x", padx=12, pady=8)
+    area = tk.Frame(win, bg=PAGE)
+    area.pack(fill="both", expand=True, padx=12, pady=(12, 8))
+    canvases = [FigureCanvasTkAgg(f, master=area) for f in figures]
+    current = [0]
+    counter = tk.Label(buttons, bg=PAGE, fg=TEXT, font=FONT)
+
+    def show(index):
+        current[0] = index % len(figures)
+        for c in canvases:
+            c.get_tk_widget().pack_forget()
+        canvases[current[0]].get_tk_widget().pack(fill="both", expand=True)
+        canvases[current[0]].draw_idle()
+        counter.configure(text=f"Chart {current[0] + 1} of {len(figures)}")
+
+    def save_image():
+        path = filedialog.asksaveasfilename(parent=win, defaultextension=".png",
+                                            filetypes=[("PNG image", "*.png")])
+        if path:
+            figures[current[0]].savefig(path, dpi=150, facecolor="white")
+
+    RoundButton(buttons, "Previous", lambda: show(current[0] - 1), 120).pack(side="left", padx=(0, 8))
+    RoundButton(buttons, "Next", lambda: show(current[0] + 1), 120).pack(side="left", padx=(0, 8))
+    RoundButton(buttons, "Save image", save_image, 140).pack(side="left", padx=(0, 16))
+    counter.pack(side="left")
+    show(0)
 
 
 # ---------- GUI helpers ----------
 
-class RoundButton(tk.Canvas):
-    def __init__(self, master, text, command, width=130, height=32):
-        super().__init__(master, width=width, height=height, bg=BG,
-                         highlightthickness=0, cursor="hand2")
-        self.command = command
-        self.box = self._round(2, 2, width - 2, height - 2, 10,
-                               fill=ACCENT, outline=BORDER, width=2)
-        self.create_text(width / 2, height / 2, text=text, fill=CARD_TEXT, font=FONT_BOLD)
-        self.bind("<Enter>", lambda e: self.itemconfig(self.box, fill=ACCENT_HOVER))
-        self.bind("<Leave>", lambda e: self.itemconfig(self.box, fill=ACCENT))
-        self.bind("<Button-1>", lambda e: self.command())
-
-    def _round(self, x1, y1, x2, y2, r, **kw):
-        pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
-               x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
-        return self.create_polygon(pts, smooth=True, **kw)
+def warn(message):
+    messagebox.showwarning("Pixel Pop", message)
 
 
 def read_count(var):
-    try:
-        n = int(var.get())
-    except ValueError:
-        return None
-    return n if MIN_C <= n <= MAX_C else None
+    text = var.get().strip()
+    if text.isdigit() and MIN_C <= int(text) <= MAX_C:
+        return int(text)
+    warn(f"Enter a whole number from {MIN_C} to {MAX_C}.")
+    return None
 
 
-def show_image(label, img):
-    label.photo = ImageTk.PhotoImage(img)  # keep a reference so it isn't deleted
+def boxed(parent, **options):
+    style = {"bg": BOX, "fg": TEXT, "font": FONT,
+             "highlightthickness": 2, "highlightbackground": BORDER}
+    style.update(options)
+    return tk.Label(parent, **style)
+
+
+def show_image(label, pil_image):
+    label.photo = ImageTk.PhotoImage(pil_image)  # keep a reference or Tk erases it
     label.configure(image=label.photo, text="", width=0, height=0)
 
 
-def build_cards(parent, palette, on_copy):
-    for child in parent.winfo_children():
-        child.destroy()
-    for e in palette:
-        card = tk.Frame(parent, bg=CARD, highlightthickness=2,
-                        highlightbackground=BORDER, cursor="hand2")
-        card.pack(side="left", padx=(0, 12), pady=4)
-        block = tk.Frame(card, bg=e["hex"], width=130, height=64)
-        block.pack_propagate(False)
-        block.pack(fill="x")
-        text = tk.Label(card, text=f"{e['hex']}\n{e['share']:.1f}%\n{e['name']}",
-                        bg=CARD, fg=CARD_TEXT, font=MONO, justify="left", anchor="w")
-        text.pack(fill="x", padx=8, pady=6)
-        for w in (card, block, text):
-            w.bind("<Button-1>", lambda _, h=e["hex"]: on_copy(h))
+class RoundButton(tk.Canvas):
+    """A rounded button that darkens while the mouse is over it."""
+
+    def __init__(self, master, text, command, width, height=32, r=10):
+        super().__init__(master, width=width, height=height, bg=PAGE,
+                         highlightthickness=0, cursor="hand2")
+        x2, y2 = width - 2, height - 2
+        pts = [2 + r, 2, x2 - r, 2, x2, 2, x2, 2 + r, x2, y2 - r, x2, y2,
+               x2 - r, y2, 2 + r, y2, 2, y2, 2, y2 - r, 2, 2 + r, 2, 2]
+        self.shape = self.create_polygon(pts, smooth=True, fill=BOX, outline=BORDER, width=2)
+        self.create_text(width / 2, height / 2, text=text, fill=TEXT, font=BOLD)
+        self.bind("<Enter>", lambda e: self.itemconfig(self.shape, fill=HOVER))
+        self.bind("<Leave>", lambda e: self.itemconfig(self.shape, fill=BOX))
+        self.bind("<Button-1>", lambda e: command())
 
 
-def header(parent, text):
-    tk.Label(parent, text=text, bg=BG, fg=INK, font=HEADING).pack(anchor="w", pady=(14, 4))
+class SwatchCards(tk.Frame):
+    """A row of color cards. Clicking one copies its hex code."""
+
+    def __init__(self, master, on_copy):
+        super().__init__(master, bg=PAGE)
+        self.on_copy = on_copy
+
+    def show(self, palette):
+        for child in self.winfo_children():
+            child.destroy()
+        for s in palette:
+            card = tk.Frame(self, bg=BOX, highlightthickness=2,
+                            highlightbackground=BORDER, cursor="hand2")
+            card.pack(side="left", padx=(0, 12), pady=4)
+            block = tk.Frame(card, bg=s.hex_code, width=130, height=64)
+            block.pack_propagate(False)
+            block.pack(fill="x")
+            text = tk.Label(card, text=f"{s.hex_code}\n{s.share:.1f}%\n{s.name}", bg=BOX,
+                            fg=TEXT, font=MONO, justify="left", anchor="w")
+            text.pack(fill="x", padx=8, pady=6)
+            for widget in (card, block, text):
+                widget.bind("<Button-1>", lambda e, code=s.hex_code: self.on_copy(code))
 
 
-def buttons(bar, items):
-    for text, cmd, pad in items:
-        RoundButton(bar, text, cmd, width=max(90, 9 * len(text))).pack(side="left", padx=pad)
+class ScrollArea(tk.Frame):
+    """A frame that scrolls vertically. Put page content in .inner."""
+
+    def __init__(self, master):
+        super().__init__(master, bg=PAGE)
+        self.canvas = tk.Canvas(self, bg=PAGE, highlightthickness=0)
+        bar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=bar.set)
+        bar.pack(side="right", fill="y")
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.inner = tk.Frame(self.canvas, bg=PAGE)
+        win = self.canvas.create_window((0, 0), window=self.inner, anchor="nw")
+        self.inner.bind("<Configure>",
+                        lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfig(win, width=e.width))
 
 
-def colors_box(bar, var):
-    tk.Label(bar, text="Colors", bg=BG, fg=INK, font=FONT).pack(side="left", padx=(16, 4))
-    ttk.Spinbox(bar, from_=MIN_C, to=MAX_C, width=4, textvariable=var).pack(side="left")
+# ---------- Tabs ----------
 
+class BaseTab(tk.Frame):
+    """Shared layout: button rows, the color count box, and headings."""
 
-# ---------- Tab 1: compare ----------
-
-class CompareTab(tk.Frame):
     def __init__(self, master, app):
-        super().__init__(master, bg=BG, padx=16, pady=12)
+        super().__init__(master, bg=PAGE, padx=16, pady=12)
         self.app = app
-        self.paths, self.images, self.palettes = [None, None], [None, None], [None, None]
         self.count = tk.StringVar(value=str(DEFAULT_C))
+        self.build_ui()
 
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x")
-        buttons(bar, [("Choose photo 1", lambda: self.choose(0), 0),
-                      ("Choose photo 2 (optional)", lambda: self.choose(1), 8)])
-        colors_box(bar, self.count)
-        buttons(bar, [("Extract", self.extract, 8),
-                      ("Show chart", self.chart, 0),
-                      ("Save", self.save, 8)])
+    def row(self, items):
+        """One straight row of buttons. None marks the Colors box."""
+        bar = tk.Frame(self, bg=PAGE)
+        bar.pack(anchor="w", pady=(0, 6))
+        for item in items:
+            if item is None:
+                tk.Label(bar, text="Colors", bg=PAGE, fg=TEXT, font=FONT).pack(side="left", padx=(8, 4))
+                ttk.Spinbox(bar, from_=MIN_C, to=MAX_C, width=4,
+                            textvariable=self.count).pack(side="left", padx=(0, 8))
+            else:
+                text, command = item
+                RoundButton(bar, text, command, max(90, 9 * len(text))).pack(side="left", padx=(0, 8))
 
-        previews = tk.Frame(self, bg=BG)
+    def heading(self, text):
+        tk.Label(self, text=text, bg=PAGE, fg=TEXT, font=HEAD).pack(anchor="w", pady=(14, 4))
+
+
+class CompareTab(BaseTab):
+    """Compare one or two photos: palettes, a comparison, pie charts, and saved files."""
+
+    def build_ui(self):
+        self.paths = [None, None]
+        self.images = [None, None]
+        self.palettes = [None, None]
+        self.row([("Choose photo 1", lambda: self.choose(0)),
+                  ("Choose photo 2 (optional)", lambda: self.choose(1)),
+                  ("Clear", self.clear), None,
+                  ("Extract", self.extract), ("Pie chart", self.show_pies),
+                  ("Save", self.save)])
+
+        previews = tk.Frame(self, bg=PAGE)
         previews.pack(pady=12)
-        self.preview_labels = [tk.Label(previews, text=f"No photo {i + 1}", bg=CARD, fg=CARD_TEXT,
-                                        font=FONT, width=44, height=12,
-                                        highlightthickness=2, highlightbackground=BORDER)
-                               for i in range(2)]
-        for label in self.preview_labels:
+        self.previews = [boxed(previews, text=f"No photo {i + 1}", bg=PHOTO, width=44, height=12)
+                         for i in range(2)]
+        for label in self.previews:
             label.pack(side="left", padx=8)
 
-        self.strip_label = tk.Label(self, bg=BG)
-        self.strip_label.pack()
-        header(self, "Dominant colors (click a card to copy its hex code)")
-        self.cards = tk.Frame(self, bg=BG)
-        self.cards.pack(anchor="w")
-        header(self, "Comparison")
-        self.summary = tk.Label(self, bg=CARD, fg=CARD_TEXT, font=MONO, justify="left",
-                                anchor="w", padx=10, pady=8, highlightthickness=2,
-                                highlightbackground=BORDER)
+        self.bars, self.cards = [], []
+        for i in range(2):
+            self.heading(f"Dominant colors, photo {i + 1} (click a card to copy its hex code)")
+            bar = tk.Label(self, bg=PAGE)
+            bar.pack(anchor="w")
+            cards = SwatchCards(self, self.app.copy_to_clipboard)
+            cards.pack(anchor="w")
+            self.bars.append(bar)
+            self.cards.append(cards)
+
+        self.heading("Comparison")
+        self.summary = boxed(self, font=MONO, justify="left", anchor="w", padx=10, pady=8)
         self.summary.pack(fill="x")
 
     def choose(self, i):
         path = filedialog.askopenfilename(filetypes=FILE_TYPES)
         if not path:
             return
-        try:
-            img = load_image(path)
-        except ValueError as error:
-            messagebox.showerror("Not an image", str(error))
-            return
+        img = load_image(path)
+        if img is None:
+            return messagebox.showerror("Not an image", f"'{os.path.basename(path)}' could not be opened.")
         self.paths[i], self.images[i], self.palettes[i] = path, img, None
         preview = img.copy()
-        preview.thumbnail(PREVIEW_SIZE)
-        show_image(self.preview_labels[i], preview)
+        preview.thumbnail(PREVIEW)
+        show_image(self.previews[i], preview)
         self.app.set_status(f"Loaded {os.path.basename(path)}")
+
+    def clear(self):
+        self.paths = [None, None]
+        self.images = [None, None]
+        self.palettes = [None, None]
+        for i, label in enumerate(self.previews):
+            label.configure(image="", text=f"No photo {i + 1}", width=44, height=12)
+        for bar, cards in zip(self.bars, self.cards):
+            bar.configure(image="")
+            cards.show([])
+        self.summary.configure(text="")
+        self.app.set_status("Cleared")
 
     def extract(self):
         if self.images[0] is None:
-            messagebox.showwarning("No photo", "Choose photo 1 first.")
-            return
+            return warn("Choose photo 1 first.")
         n = read_count(self.count)
         if n is None:
-            messagebox.showwarning("Colors", f"Enter a whole number from {MIN_C} to {MAX_C}.")
             return
-        self.palettes = [find_palette(list(shrink(img).getdata()), n) if img else None
-                         for img in self.images]
-
-        show_image(self.strip_label, swatch_strip(self.palettes[0], STRIP_W, STRIP_H))
-        build_cards(self.cards, self.palettes[0], self.app.copy_to_clipboard)
-
-        p1, p2 = self.palettes
-        lines = [f"Photo 1 tones: {', '.join(sorted({e['name'] for e in p1}))}"]
-        if p2:
-            lines.append(f"Photo 2 tones: {', '.join(sorted({e['name'] for e in p2}))}")
-            matches = compare(p1, p2)
-            lines.append("Close matches:" if matches else "No close color matches.")
-            lines += [f"   {a['hex']} (photo 1)  ~  {b['hex']} (photo 2)   distance {d:.0f}"
-                      for a, b, d in matches]
-            shared = {e["name"] for e in p1} & {e["name"] for e in p2}
-            lines.append("Shared tones: " + (", ".join(sorted(shared)) or "none"))
-        else:
-            lines.append("Choose photo 2 to see a comparison.")
-        self.summary.configure(text="\n".join(lines))
+        self.palettes = [palette_of([img], n) if img is not None else None for img in self.images]
+        for palette, bar, cards in zip(self.palettes, self.bars, self.cards):
+            if palette is None:
+                bar.configure(image="")
+                cards.show([])
+            else:
+                show_image(bar, color_bar(palette, BAR_W, BAR_H))
+                cards.show(palette)
+        self.summary.configure(text=compare_text(*self.palettes))
         self.app.set_status("Palette extracted")
 
-    def chart(self):
+    def show_pies(self):
         if self.palettes[0] is None:
-            messagebox.showwarning("Nothing to chart", "Extract a palette first.")
-            return
-        for img, pal, name in zip(self.images, self.palettes, ["Photo 1", "Photo 2"]):
-            if pal:
-                show_chart(img, pal, f"{name} colors")
+            return warn("Extract a palette first.")
+        figures = [pie_chart(self.images[i], pal, f"Photo {i + 1} color shares")
+                   for i, pal in enumerate(self.palettes) if pal is not None]
+        open_chart_window(figures, "Color shares")
 
     def save(self):
         if self.palettes[0] is None:
-            messagebox.showwarning("Nothing to save", "Extract a palette first.")
-            return
-        for path, pal in zip(self.paths, self.palettes):
-            if path and pal:
+            return warn("Extract a palette first.")
+        for path, palette in zip(self.paths, self.palettes):
+            if path is not None and palette is not None:
                 base = os.path.splitext(path)[0]
-                save_text(pal, base + "_palette.txt")
-                swatch_strip(pal, STRIP_W, STRIP_H).save(base + "_palette.png")
+                save_text(palette, base + "_palette.txt")
+                color_bar(palette, BAR_W, BAR_H).save(base + "_palette.png")
         messagebox.showinfo("Saved", "Palette files were saved next to your photos.")
 
 
-# ---------- Tab 2: mood board ----------
+class MoodBoardTab(BaseTab):
+    """Combine several photos into one collage that shares a single palette."""
 
-class MoodBoardTab(tk.Frame):
-    def __init__(self, master, app):
-        super().__init__(master, bg=BG, padx=16, pady=12)
-        self.app = app
-        self.paths, self.board, self.palette = [], None, None
-        self.count = tk.StringVar(value=str(DEFAULT_C))
+    EMPTY = "Add 2 or more photos, then build your board."
 
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x")
-        buttons(bar, [("Add photos", self.add_photos, 0), ("Clear", self.clear, 8)])
-        colors_box(bar, self.count)
-        buttons(bar, [("Build board", self.build, 8),
-                      ("Show chart", self.chart, 0),
-                      ("Save", self.save, 8)])
-
-        self.listbox = tk.Listbox(self, height=4, font=FONT, relief="flat", bg=CARD, fg=CARD_TEXT,
-                                  highlightthickness=2, highlightbackground=BORDER)
+    def build_ui(self):
+        self.paths, self.names, self.per_photo = [], [], []
+        self.board, self.palette = None, None
+        self.row([("Add photos", self.add_photos), ("Clear", self.clear), None,
+                  ("Build board", self.build), ("Pie chart", self.show_pie),
+                  ("Palette shift", self.show_shift), ("Save", self.save)])
+        self.listbox = tk.Listbox(self, height=4, font=FONT, relief="flat", bg=PHOTO,
+                                  fg=TEXT, highlightthickness=2, highlightbackground=BORDER)
         self.listbox.pack(fill="x", pady=10)
-        self.board_label = tk.Label(self, text="Add 2 or more photos, then build your board.",
-                                    bg=CARD, fg=CARD_TEXT, font=FONT, width=100, height=12,
-                                    highlightthickness=2, highlightbackground=BORDER)
+        self.board_label = boxed(self, text=self.EMPTY, bg=PHOTO, width=100, height=12)
         self.board_label.pack(pady=4)
-        header(self, "Shared palette (click a card to copy its hex code)")
-        self.cards = tk.Frame(self, bg=BG)
+        self.heading("Shared palette (click a card to copy its hex code)")
+        self.cards = SwatchCards(self, self.app.copy_to_clipboard)
         self.cards.pack(anchor="w")
 
     def add_photos(self):
@@ -326,53 +447,55 @@ class MoodBoardTab(tk.Frame):
                 self.listbox.insert("end", os.path.basename(path))
 
     def clear(self):
-        self.paths, self.board, self.palette = [], None, None
+        self.paths, self.names, self.per_photo = [], [], []
+        self.board, self.palette = None, None
         self.listbox.delete(0, "end")
-        self.board_label.configure(image="", text="Add 2 or more photos, then build your board.")
-        build_cards(self.cards, [], self.app.copy_to_clipboard)
+        self.board_label.configure(image="", text=self.EMPTY)
+        self.cards.show([])
 
     def build(self):
         if len(self.paths) < 2:
-            messagebox.showwarning("Add more photos", "A mood board needs at least 2 photos.")
-            return
+            return warn("A mood board needs at least 2 photos.")
         n = read_count(self.count)
         if n is None:
-            messagebox.showwarning("Colors", f"Enter a whole number from {MIN_C} to {MAX_C}.")
             return
-        images = []
-        for path in self.paths:
-            try:
-                images.append(load_image(path))
-            except ValueError:
-                pass
-        if len(images) < 2:
-            messagebox.showerror("Error", "Need at least 2 valid photos.")
-            return
-
-        self.board, self.palette = build_mood_board(images, n)
+        loaded = [(os.path.basename(p), load_image(p)) for p in self.paths]
+        loaded = [(name, img) for name, img in loaded if img is not None]
+        if len(loaded) < 2:
+            return warn("Need at least 2 valid photos.")
+        self.names = [name for name, _ in loaded]
+        images = [img for _, img in loaded]
+        self.palette = palette_of(images, n)
+        self.per_photo = [palette_of([img], n) for img in images]
+        self.board = build_mood_board(images, self.palette)
         preview = self.board.copy()
-        preview.thumbnail((860, 420))
+        preview.thumbnail(BOARD_PREVIEW)
         show_image(self.board_label, preview)
-        build_cards(self.cards, self.palette, self.app.copy_to_clipboard)
+        self.cards.show(self.palette)
         self.app.set_status("Mood board built")
 
-    def chart(self):
+    def show_pie(self):
         if self.board is None:
-            messagebox.showwarning("Nothing to chart", "Build a mood board first.")
-            return
-        show_chart(self.board, self.palette, "Mood board palette")
+            return warn("Build a mood board first.")
+        open_chart_window([pie_chart(self.board, self.palette, "Shared palette color shares")],
+                          "Color shares")
+
+    def show_shift(self):
+        if self.board is None:
+            return warn("Build a mood board first.")
+        names = ["All photos"] + self.names
+        open_chart_window([shift_chart(names, [self.palette] + self.per_photo)], "Palette shift")
 
     def save(self):
         if self.board is None:
-            messagebox.showwarning("Nothing to save", "Build a mood board first.")
-            return
+            return warn("Build a mood board first.")
         path = filedialog.asksaveasfilename(defaultextension=".png",
                                             filetypes=[("PNG image", "*.png")],
                                             initialfile="mood_board.png")
         if path:
             self.board.save(path)
             save_text(self.palette, os.path.splitext(path)[0] + "_palette.txt")
-            messagebox.showinfo("Saved", f"Saved {os.path.basename(path)} and its palette text file.")
+            messagebox.showinfo("Saved", f"Saved {os.path.basename(path)} and its palette file.")
 
 
 # ---------- Main window ----------
@@ -381,58 +504,59 @@ class PaletteApp(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Pixel Pop")
-        self.geometry("1000x820")
-        self.configure(bg=BG)
+        self.geometry("1200x900")
+        self.configure(bg=PAGE)
+        ttk.Style(self).theme_use("clam")
+        self.status = tk.StringVar(value="Ready")
 
-        style = ttk.Style(self)
-        style.theme_use("clam")
-        style.configure("TSpinbox", font=FONT)
+        self.page = ScrollArea(self)
+        self.page.pack(fill="both", expand=True)
+        root = self.page.inner
 
-        tk.Label(self, text="Pixel Pop", bg=BG, fg=INK, font=TITLE).pack(anchor="w", padx=24, pady=(16, 0))
-        tk.Label(self, text="Find the main colors in your photos.", bg=BG, fg=MUTED,
-                 font=FONT).pack(anchor="w", padx=24)
+        logo = load_image(LOGO)
+        if logo is not None:
+            logo.thumbnail(LOGO_SIZE)
+            label = tk.Label(root, bg=PAGE, bd=0)
+            show_image(label, logo)
+            label.pack(pady=(10, 0))
+        else:
+            tk.Label(root, text="Pixel Pop", bg=PAGE, fg=TEXT, font=TITLE).pack(pady=(16, 0))
+        tk.Label(root, text="Find the main colors in your photos.", bg=PAGE, fg=TEXT,
+                 font=FONT).pack(pady=(4, 0))
 
-        bar = tk.Frame(self, bg=BG)
-        bar.pack(fill="x", padx=16, pady=(12, 0))
-        body = tk.Frame(self, bg=BG)
-        body.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+        tab_bar = tk.Frame(root, bg=PAGE)
+        tab_bar.pack(fill="x", padx=16, pady=(12, 0))
+        body = tk.Frame(root, bg=PAGE)
+        body.pack(fill="x", padx=16, pady=(0, 12))
 
         self.pages, self.tabs = {}, {}
-        for name, page in [("Compare photos", CompareTab), ("Mood board", MoodBoardTab)]:
-            self.pages[name] = page(body, self)
-            label = tk.Label(bar, text=name, cursor="hand2", bd=0)
-            label.pack(side="left", padx=(0, 6), anchor="s")
-            label.bind("<Button-1>", lambda e, n=name: self.select(n))
-            self.tabs[name] = label
+        for name, page_class in [("Compare photos", CompareTab), ("Mood board", MoodBoardTab)]:
+            self.pages[name] = page_class(body, self)
+            tab = tk.Label(tab_bar, text=name, cursor="hand2", bd=0,
+                           highlightthickness=2, highlightbackground=BORDER)
+            tab.pack(side="left", padx=(0, 4), anchor="s")
+            tab.bind("<Button-1>", lambda e, n=name: self.select(n))
+            self.tabs[name] = tab
 
-        self.status = tk.StringVar(value="Ready")
-        tk.Label(self, textvariable=self.status, bg=BG, fg=MUTED, font=FONT,
+        tk.Label(root, textvariable=self.status, bg=PAGE, fg=TEXT, font=FONT,
                  anchor="w").pack(fill="x", padx=24, pady=(0, 8))
-
+        self.bind("<MouseWheel>", lambda e: self.page.canvas.yview_scroll(int(-e.delta / 120), "units"))
         self.select("Compare photos")
 
     def select(self, name):
-        for tab_name, label in self.tabs.items():
+        for tab_name, tab in self.tabs.items():
             active = tab_name == name
-            label.configure(
-                text=tab_name,
-                font=TAB_ON if active else TAB_OFF,
-                bg=CARD if active else TAB_OFF_BG,
-                fg=CARD_TEXT if active else INK,
-                padx=22 if active else 12,
-                pady=10 if active else 5,
-            )
+            tab.configure(font=TAB_FONT_ON if active else TAB_FONT_OFF,
+                          bg=BOX if active else TAB_BG, fg=TEXT,
+                          padx=22 if active else 12, pady=10 if active else 5)
         for page in self.pages.values():
             page.pack_forget()
-        self.pages[name].pack(fill="both", expand=True)
-
-    def set_status(self, text):
-        self.status.set(text)
+        self.pages[name].pack(fill="x")
 
     def copy_to_clipboard(self, hex_code):
         self.clipboard_clear()
         self.clipboard_append(hex_code)
-        self.set_status(f"Copied {hex_code} to clipboard")
+        self.status.set(f"Copied {hex_code} to clipboard")
 
 
 if __name__ == "__main__":
