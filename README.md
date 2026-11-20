@@ -21,6 +21,8 @@ Python code and data files: https://github.com/chaaaaaaaya/palette-extractor
 
 Slide: https://canva.link/k65puajdgs87x3g
 
+Report: https://drive.google.com/file/d/1pcmzLyMDZbIRTXDzpDXCS-9YV8Goq_Jr/view?usp=sharing
+
 Presentation: https://youtu.be/p2v6BkjTRuU
 
 Project Guideline: https://docs.google.com/spreadsheets/d/10QzUJDuy_HVgu22RIf8UqX1-Wtct5GskPG9JlaUY6hY/edit?usp=sharing
